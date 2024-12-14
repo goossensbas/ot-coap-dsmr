@@ -200,89 +200,31 @@ void dsmr_reader_task(void *pvParameters)
     uint8_t* data = (uint8_t*) malloc(BUF_SIZE+1);
     if (data == NULL) { 
         ESP_LOGE(DSMR_TAG, "Failed to allocate memory for buffer"); 
+        vTaskDelete(NULL);
         return; 
     }
-    uint8_t* buffer = (uint8_t*) malloc(BUF_SIZE + 1); 
-    if (buffer == NULL) { 
-      ESP_LOGE(DSMR_TAG, "Failed to allocate memory for buffer"); 
-      free(data); 
-      return; 
-    } 
-    
-    int buffer_index = 0; 
-    int write_to_buffer = 0;
+        while (1) {
+        // Read data from UART
+        int length = uart_read_bytes(UART_PORT_NUM, data, BUF_SIZE, pdMS_TO_TICKS(1000));
+        if (length > 0) {
+            // Null-terminate the received data to make it a valid string
+            data[length] = '\0';
+            ESP_LOGI(DSMR_TAG, "Received data: %s", data);
 
-    while (1){        
-        int bytes_read = uart_read_bytes(UART_PORT_NUM, data, BUF_SIZE, pdMS_TO_TICKS(10)); 
-        if (bytes_read > 0) {            
-            // Process each byte 
-            for (int i = 0; i < bytes_read; i++) { 
-                if (data[i] == '/') { 
-                    // Start writing to buffer if the backslash is found 
-                    write_to_buffer = 1; 
-                    buffer_index = 0; 
-                }
-                if (write_to_buffer) { 
-                    buffer[buffer_index++] = data[i];
-                    
-                    // Check for the end of the telegram (exclamation mark "!")
-                    if (data[i] == '!'){
-                            // Ensure there's enough room for the CRC (4 characters)
-                        if (buffer_index + 4 <= BUF_SIZE) {
-                            // Read the CRC characters after the "!"
-                            for (int j = 0; j < 4; j++) {
-                                int crc_bytes_read = uart_read_bytes(UART_PORT_NUM, &buffer[buffer_index], 1, pdMS_TO_TICKS(10));
-                                if (crc_bytes_read > 0) {
-                                    buffer_index++;
-                                }
-                            }
+            // Process the data (e.g., parse telegram)
+            // Add your parsing logic here
 
-                            buffer[buffer_index] = 0; // Null-terminate the string for safe handling
-
-                            //log the entire buffer content
-                            log_data(buffer,buffer_index);
-
-                            // Extract the CRC string 
-                            char crc_str[5]; 
-                            memcpy(crc_str, &buffer[buffer_index - 4], 4); 
-                            crc_str[4] = 0; // Null-terminate the CRC string
-
-                            // Convert the CRC string to an integer 
-                            unsigned int received_crc; 
-                            sscanf(crc_str, "%4X", &received_crc); 
-                            ESP_LOGI(DSMR_TAG, "Received CRC: 0x%04X", received_crc);
-
-                            // Log the data going into CRC calculation
-                            //log_data(buffer, buffer_index);
-                            
-                            // Calculate CRC16 for the data before "!" 
-                            unsigned int calculated_crc = CRC16(0xFFFF, buffer, buffer_index -5); 
-                            ESP_LOGI(DSMR_TAG, "Calculated CRC: 0x%04X", calculated_crc);
-
-                            // Print the telegram including the CRC part
-                            ESP_LOGI(DSMR_TAG, "Received telegram: %.*s%4s", buffer_index, buffer, crc_str); 
-                            
-                            // Compare the calculated CRC with the received CRC 
-                            if (calculated_crc == received_crc) { 
-                                ESP_LOGI(DSMR_TAG, "CRC check passed!"); 
-                            } 
-                            else { 
-                                ESP_LOGE(DSMR_TAG, "CRC check failed!"); 
-                            } 
-                            // Clear the buffer by resetting the index 
-                            memset(buffer, 0, BUF_SIZE + 1); 
-                            buffer_index = 0; 
-                            write_to_buffer = 0; // Stop writing to buffer
-                        }
-                    }
-                }
-            }    
+            // Example: Print the received data
+            printf("Received telegram: %s\n", data);
         }
-    }
-    free(data);
-    free(buffer);
-}
 
+        // Clear the buffer
+        memset(data, 0, BUF_SIZE);
+    }
+
+    free(data);
+    vTaskDelete(NULL);
+}
 
 // Send data task
 void send_data_task(void *pvParameters) {
