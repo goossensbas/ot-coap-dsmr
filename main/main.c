@@ -51,8 +51,11 @@
 
 static otInstance *instance;
 static otCoapResource coapResource;
-// Mutex for protecting access to sensor data
-SemaphoreHandle_t data_mutex;
+// Global variable to store the telegram 
+static uint8_t telegram[BUF_SIZE]; 
+static size_t telegram_length = 0;
+// Mutex for protecting access to data
+SemaphoreHandle_t telegram_mutex;
 
 // Global variables for p1 data
 
@@ -103,7 +106,7 @@ void handle_coap_response(void *context, otMessage *message, const otMessageInfo
 }
 
 //send CoAP message
-void send_coap_message(void) {
+void send_coap_message(uint8_t *telegram, size_t telegram_length) {
     otError error;
     otMessage *message;
     otMessageInfo messageInfo;
@@ -113,7 +116,12 @@ void send_coap_message(void) {
     if (instance == NULL) {
         ESP_LOGE(COAP_TAG, "OpenThread instance is NULL. Cannot send CoAP message.");
     return;
-}
+    }
+    if (telegram == NULL || telegram_length == 0) {
+        ESP_LOGE("COAP_TAG", "Invalid telegram or length.");
+        return;
+    }
+
 
     // Create a new CoAP message
     message = otCoapNewMessage(instance, NULL);
@@ -122,21 +130,23 @@ void send_coap_message(void) {
         return;
     }
 
-    // Set CoAP message type and code (POST request)
+    // Set CoAP message type and code (PUT)
     otCoapMessageInit(message, OT_COAP_TYPE_CONFIRMABLE, OT_COAP_CODE_PUT);
+    //otCoapMessageGenerateToken(message, OT_COAP_DEFAULT_TOKEN_LENGTH);
     otCoapMessageAppendUriPathOptions(message, COAP_URI_PATH);
     
     //set the message type to JSON
-    otCoapMessageAppendContentFormatOption(message, OT_COAP_OPTION_CONTENT_FORMAT_JSON);
-    // Build JSON payload with sensor data
-    char payload[128];
-    snprintf(payload, sizeof(payload), "{\"test\":123}");
-    
+    otCoapMessageAppendContentFormatOption(message, OT_COAP_OPTION_CONTENT_FORMAT_TEXT_PLAIN);
+        
     //set a payload marker         
     otCoapMessageSetPayloadMarker(message);
     
     // Add the payload to the CoAP message
-    otMessageAppend(message, payload, strlen(payload));
+    if (otMessageAppend(message, telegram, telegram_length) != OT_ERROR_NONE) {
+        ESP_LOGE(COAP_TAG, "Failed to append message.");
+        otMessageFree(message);
+        return;
+    }
 
     // Set the destination address (replace with actual CoAP server address)
     memset(&messageInfo, 0, sizeof(messageInfo));
@@ -159,8 +169,7 @@ void coap_init(otInstance *instance) {
 }
 
 //CRC check code
-uint16_t CRC16(uint16_t crc, const uint8_t *buf, size_t len)
-{
+uint16_t CRC16(uint16_t crc, const uint8_t *buf, size_t len){
     for (size_t pos = 0; pos < len; pos++)
     {
         crc ^= (unsigned int)buf[pos]; // * XOR byte into least sig. byte of crc
@@ -184,8 +193,7 @@ uint16_t CRC16(uint16_t crc, const uint8_t *buf, size_t len)
 }
 
 // DSMR reader task
-void dsmr_reader_task(void *pvParameters)
-{
+void dsmr_reader_task(void *pvParameters){
     
     uint8_t* buffer = (uint8_t*) malloc(BUF_SIZE+1);
     uint8_t *data = (uint8_t *) malloc(BUF_SIZE);
@@ -197,7 +205,7 @@ void dsmr_reader_task(void *pvParameters)
         return; 
     }
     int buffer_index = 0;
-    int telegram_length = 0;
+    int telegram_temp_length = 0;
 
     while (1) {
         // Read data from UART
@@ -207,15 +215,15 @@ void dsmr_reader_task(void *pvParameters)
             // Check if we have received the full telegram
             for (int i = 0; i < buffer_index; i++) {
                 if (buffer[i] == '/') {
-                    telegram_length = 0;  // Reset telegram length at the start of a new telegram
+                    telegram_temp_length = 0;  // Reset telegram length at the start of a new telegram
                 }
-                telegram_length++;
+                telegram_temp_length++;
 
                 // Check for the end of the telegram and the 4 characters after "!"
                 if (buffer[i] == '!' && (i + 4) < buffer_index) {
                     // Ensure there's enough room for the 4 characters after "!"
-                    if (telegram_length + 4 <= BUF_SIZE) {
-                        memcpy(data, buffer + (i + 1 - telegram_length), telegram_length + 4);
+                    if (telegram_temp_length + 4 <= BUF_SIZE) {
+                        memcpy(data, buffer + (i + 1 - telegram_temp_length), telegram_length + 4);
                         data[telegram_length + 4] = '\0';
 
                         // Log the telegram
@@ -241,6 +249,11 @@ void dsmr_reader_task(void *pvParameters)
                         // Verify CRC
                         if (calculated_crc == received_crc) {
                             ESP_LOGI(DSMR_TAG, "CRC check passed!");
+                            // Copy the verified telegram to the global variable with mutex lock
+                            xSemaphoreTake(telegram_mutex, portMAX_DELAY);
+                            memcpy(telegram, data, telegram_temp_length);
+                            telegram_length = telegram_temp_length;
+                            xSemaphoreGive(telegram_mutex);
                         } else {
                             ESP_LOGE(DSMR_TAG, "CRC check failed!");
                             ESP_LOGI(DSMR_TAG, "Data for CRC (hex):"); 
@@ -255,8 +268,6 @@ void dsmr_reader_task(void *pvParameters)
                         buffer_index -= (i + 5);
                         break;
                     }
-                    
-                    
                 }
             }
         }
@@ -279,17 +290,22 @@ void send_data_task(void *pvParameters) {
     while (1) {
         
         // Lock the mutex before accessing the shared data
-        if (xSemaphoreTake(data_mutex, portMAX_DELAY)) {
-            // Read global variables
+        if (xSemaphoreTake(telegram_mutex, portMAX_DELAY)) {
+            
+            //print the telegram
+            if (telegram_length > 0){
+                ESP_LOGI("SEND_DATA", "Telegram: %.*s", telegram_length, telegram);
+                ESP_LOGI("SEND_DATA", "Telegram size: %d bytes", telegram_length);
+                send_coap_message(telegram, telegram_length);
+            }
 
-            xSemaphoreGive(data_mutex);  // Release the mutex
+            xSemaphoreGive(telegram_mutex);  // Release the mutex
         } else { 
             ESP_LOGE("Mutex", "Failed to take mutex"); 
         } 
 
         // Code to send data to the server
-        
-        send_coap_message();
+        //send_coap_message();
         vTaskDelay(pdMS_TO_TICKS(SEND_DELAY_MS));  // Delay for 30 seconds
     }
 }
@@ -363,8 +379,8 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_vfs_eventfd_register(&eventfd_config));
        
     // Create mutex
-    data_mutex = xSemaphoreCreateMutex();
-    if (data_mutex == NULL) {
+    telegram_mutex = xSemaphoreCreateMutex();
+    if (telegram_mutex == NULL) {
         ESP_LOGE("APP", "Failed to create mutex");
         return;
     }
@@ -375,5 +391,5 @@ void app_main(void)
 
     xTaskCreate(ot_task_worker, "ot_cli_main", 10240, xTaskGetCurrentTaskHandle(), 5, NULL);
     xTaskCreate(dsmr_reader_task, "dsmr_reader_task",  8192, NULL, 6, NULL);
-    //xTaskCreate(&send_data_task, "send_data_task", 2048, NULL, 5, NULL);
+    xTaskCreate(&send_data_task, "send_data_task", 4096, NULL, 5, NULL);
 }
