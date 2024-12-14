@@ -159,7 +159,7 @@ void coap_init(otInstance *instance) {
 }
 
 //CRC check code
-unsigned int CRC16(unsigned int crc, const uint8_t *buf, size_t len)
+uint16_t CRC16(uint16_t crc, const uint8_t *buf, size_t len)
 {
     for (size_t pos = 0; pos < len; pos++)
     {
@@ -181,17 +181,6 @@ unsigned int CRC16(unsigned int crc, const uint8_t *buf, size_t len)
         }
     }
     return crc;
-}
-
-//temporary log function
-void log_data(const uint8_t *buffer, size_t len)
-{
-    printf("Data: ");
-    for (size_t i = 0; i < len; i++)
-    {
-        printf("%c", buffer[i]);
-    }
-    printf("\n");
 }
 
 // DSMR reader task
@@ -230,7 +219,36 @@ void dsmr_reader_task(void *pvParameters)
                         data[telegram_length + 4] = '\0';
 
                         // Log the telegram
-                        ESP_LOGI(DSMR_TAG, "Received telegram: %s", data);
+                        //ESP_LOGI(DSMR_TAG, "Received telegram:\n%s", data);
+
+                        // Log the data going into the CRC function
+                        //ESP_LOGI(DSMR_TAG, "Data for CRC:\n%.*s", telegram_length, data);
+
+                        // Extract CRC string
+                        char crc_str[5];
+                        memcpy(crc_str, data + telegram_length, 4);
+                        crc_str[4] = '\0';
+
+                        // Convert CRC string to integer
+                        unsigned int received_crc;
+                        sscanf(crc_str, "%4X", &received_crc);
+                        ESP_LOGI(DSMR_TAG, "Received CRC: 0x%04X", received_crc);
+
+                        // Calculate CRC for the telegram data (excluding CRC part)
+                        unsigned int calculated_crc = CRC16(0x0000, data, telegram_length);
+                        ESP_LOGI(DSMR_TAG, "Calculated CRC: 0x%04X", calculated_crc);
+
+                        // Verify CRC
+                        if (calculated_crc == received_crc) {
+                            ESP_LOGI(DSMR_TAG, "CRC check passed!");
+                        } else {
+                            ESP_LOGE(DSMR_TAG, "CRC check failed!");
+                            ESP_LOGI(DSMR_TAG, "Data for CRC (hex):"); 
+                            for (int j = 0; j < telegram_length; j++) { 
+                                printf("%02X ", data[j]); 
+                                } 
+                            printf("\n");
+                        }
 
                         // Adjust buffer for the next telegram 
                         memmove(buffer, buffer + (i + 5), buffer_index - (i + 5));
