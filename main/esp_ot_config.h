@@ -78,3 +78,5 @@
         .netif_queue_size = 10,                 \
         .task_queue_size = 10,                  \
     }
+
+#define OPENTHREAD_CONFIG_COAP_BLOCKWISE_TRANSFER_ENABLE 1

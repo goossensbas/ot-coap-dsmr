@@ -33,10 +33,11 @@
 #include <openthread/link.h>
 #include <openthread/tasklet.h>
 #include <openthread/logging.h>
+#include <openthread/message.h>
 
 #define UART_RX_PIN 10 
 #define BUF_SIZE 2048
-
+#define BLOCK_SIZE 128
 // I2C configuration  found in bme280.h
 
 
@@ -46,6 +47,7 @@
 #define COAP_URI_PATH "dsmr"
 #define COAP_SERVER "fd3f:4f29:5339:1ff9:ffc:7570:df42:e75f"
 #define SEND_DELAY_MS 10000
+#define FRAGMENT_SIZE 100  // Size of each fragment
 
 #define UART_PORT_NUM      UART_NUM_1
 
@@ -105,63 +107,84 @@ void handle_coap_response(void *context, otMessage *message, const otMessageInfo
     }
 }
 
-//send CoAP message
 void send_coap_message(uint8_t *telegram, size_t telegram_length) {
     otError error;
     otMessage *message;
     otMessageInfo messageInfo;
-    otMessageSettings messageSettings = { true, OT_COAP_PORT };
-    
+
     otInstance *instance = esp_openthread_get_instance();
     if (instance == NULL) {
         ESP_LOGE(COAP_TAG, "OpenThread instance is NULL. Cannot send CoAP message.");
-    return;
+        return;
     }
     if (telegram == NULL || telegram_length == 0) {
-        ESP_LOGE("COAP_TAG", "Invalid telegram or length.");
+        ESP_LOGE(COAP_TAG, "Invalid telegram or length.");
         return;
     }
 
+    size_t blockNum = 0;
+    size_t bytesRemaining = telegram_length;
+    size_t offset = 0;
+    bool moreBlocks;
 
-    // Create a new CoAP message
-    message = otCoapNewMessage(instance, NULL);
-    if (message == NULL) {
-        ESP_LOGE(COAP_TAG, "Failed to allocate CoAP message");
-        return;
-    }
+    while (bytesRemaining > 0) {
+        size_t blockLen = bytesRemaining > BLOCK_SIZE ? BLOCK_SIZE : bytesRemaining;
+        moreBlocks = bytesRemaining > blockLen;
+        otCoapType messageType = blockNum == 0 ? OT_COAP_TYPE_CONFIRMABLE : OT_COAP_TYPE_NON_CONFIRMABLE;
 
-    // Set CoAP message type and code (PUT)
-    otCoapMessageInit(message, OT_COAP_TYPE_CONFIRMABLE, OT_COAP_CODE_PUT);
-    //otCoapMessageGenerateToken(message, OT_COAP_DEFAULT_TOKEN_LENGTH);
-    otCoapMessageAppendUriPathOptions(message, COAP_URI_PATH);
-    
-    //set the message type to JSON
-    otCoapMessageAppendContentFormatOption(message, OT_COAP_OPTION_CONTENT_FORMAT_TEXT_PLAIN);
-        
-    //set a payload marker         
-    otCoapMessageSetPayloadMarker(message);
-    
-    // Add the payload to the CoAP message
-    if (otMessageAppend(message, telegram, telegram_length) != OT_ERROR_NONE) {
-        ESP_LOGE(COAP_TAG, "Failed to append message.");
-        otMessageFree(message);
-        return;
-    }
+        // Create a new CoAP message
+        message = otCoapNewMessage(instance, NULL);
+        if (message == NULL) {
+            ESP_LOGE(COAP_TAG, "Failed to allocate CoAP message");
+            return;
+        }
 
-    // Set the destination address (replace with actual CoAP server address)
-    memset(&messageInfo, 0, sizeof(messageInfo));
-    otIp6AddressFromString(COAP_SERVER, &messageInfo.mPeerAddr); // Multicast or specific server address
-    messageInfo.mPeerPort = OT_COAP_PORT;
+        // Set CoAP message type and code (PUT)
+        otCoapMessageInit(message, messageType, OT_COAP_CODE_PUT);
+        otCoapMessageGenerateToken(message, OT_COAP_DEFAULT_TOKEN_LENGTH);
+        otCoapMessageAppendUriPathOptions(message, COAP_URI_PATH);
 
-    // Send the CoAP message
-    error = otCoapSendRequest(instance, message, &messageInfo, handle_coap_response, NULL);
-    if (error != OT_ERROR_NONE) {
-        ESP_LOGE(COAP_TAG, "Failed to send CoAP message: %d", error);
-        otMessageFree(message);
-    } else {
-        ESP_LOGI(COAP_TAG, "CoAP message sent successfully");
+        // Set the message type to plain text
+        otCoapMessageAppendContentFormatOption(message, OT_COAP_OPTION_CONTENT_FORMAT_TEXT_PLAIN);
+
+        // Set a payload marker
+        otCoapMessageSetPayloadMarker(message);
+
+        // Append Block1 option for block-wise transfer
+        otCoapMessageAppendBlock1Option(message, blockNum, moreBlocks, BLOCK_SIZE);
+
+        // Add the payload to the CoAP message
+        if (otMessageAppend(message, telegram + offset, blockLen) != OT_ERROR_NONE) {
+            ESP_LOGE(COAP_TAG, "Failed to append message.");
+            otMessageFree(message);
+            return;
+        }
+
+        // Set the destination address
+        memset(&messageInfo, 0, sizeof(messageInfo));
+        otIp6AddressFromString(COAP_SERVER, &messageInfo.mPeerAddr);
+        messageInfo.mPeerPort = OT_DEFAULT_COAP_PORT;
+
+        // Send the CoAP message
+        error = otCoapSendRequest(instance, message, &messageInfo, handle_coap_response, NULL);
+        if (error != OT_ERROR_NONE) {
+            ESP_LOGE(COAP_TAG, "Failed to send CoAP message: %d", error);
+            otMessageFree(message);
+            return;
+        } else {
+            ESP_LOGI(COAP_TAG, "CoAP block %zu sent successfully", blockNum);
+        }
+
+        // Ensure acknowledgment before sending the next block
+        vTaskDelay(pdMS_TO_TICKS(200));  // Adjust delay as needed
+
+        bytesRemaining -= blockLen;
+        offset += blockLen;
+        blockNum++;
     }
 }
+
+
 
 void coap_init(otInstance *instance) {
     otCoapStart(instance, OT_DEFAULT_COAP_PORT);
