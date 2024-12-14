@@ -197,31 +197,60 @@ void log_data(const uint8_t *buffer, size_t len)
 // DSMR reader task
 void dsmr_reader_task(void *pvParameters)
 {
-    uint8_t* data = (uint8_t*) malloc(BUF_SIZE+1);
-    if (data == NULL) { 
+    
+    uint8_t* buffer = (uint8_t*) malloc(BUF_SIZE+1);
+    uint8_t *data = (uint8_t *) malloc(BUF_SIZE);
+    if (buffer == NULL || data == NULL) { 
         ESP_LOGE(DSMR_TAG, "Failed to allocate memory for buffer"); 
+        if (buffer) free(buffer);
+        if (data) free(data);
         vTaskDelete(NULL);
         return; 
     }
-        while (1) {
+    int buffer_index = 0;
+    int telegram_length = 0;
+
+    while (1) {
         // Read data from UART
-        int length = uart_read_bytes(UART_PORT_NUM, data, BUF_SIZE, pdMS_TO_TICKS(1000));
+        int length = uart_read_bytes(UART_PORT_NUM, buffer + buffer_index, BUF_SIZE - buffer_index, pdMS_TO_TICKS(1000));
         if (length > 0) {
-            // Null-terminate the received data to make it a valid string
-            data[length] = '\0';
-            ESP_LOGI(DSMR_TAG, "Received data: %s", data);
+            buffer_index += length;
+            // Check if we have received the full telegram
+            for (int i = 0; i < buffer_index; i++) {
+                if (buffer[i] == '/') {
+                    telegram_length = 0;  // Reset telegram length at the start of a new telegram
+                }
+                telegram_length++;
 
-            // Process the data (e.g., parse telegram)
-            // Add your parsing logic here
+                // Check for the end of the telegram and the 4 characters after "!"
+                if (buffer[i] == '!' && (i + 4) < buffer_index) {
+                    // Ensure there's enough room for the 4 characters after "!"
+                    if (telegram_length + 4 <= BUF_SIZE) {
+                        memcpy(data, buffer + (i + 1 - telegram_length), telegram_length + 4);
+                        data[telegram_length + 4] = '\0';
 
-            // Example: Print the received data
-            printf("Received telegram: %s\n", data);
+                        // Log the telegram
+                        ESP_LOGI(DSMR_TAG, "Received telegram: %s", data);
+
+                        // Adjust buffer for the next telegram 
+                        memmove(buffer, buffer + (i + 5), buffer_index - (i + 5));
+                        buffer_index -= (i + 5);
+                        break;
+                    }
+                    
+                    
+                }
+            }
         }
 
-        // Clear the buffer
-        memset(data, 0, BUF_SIZE);
+        // Clear the buffer if it exceeds the capacity
+        if (buffer_index >= BUF_SIZE) {
+            memset(buffer, 0, BUF_SIZE);
+            buffer_index = 0;
+        }
     }
 
+    free(buffer);
     free(data);
     vTaskDelete(NULL);
 }
